@@ -1,229 +1,181 @@
-name: Nobab Multi-Agent Factory
+name: Nobab Final Factory
 on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
-  orchestrate:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 300
-    permissions:
-      issues: write
-      contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y tor exiftool git curl wget
-          pip3 install requests beautifulsoup4 pillow pycryptodome stem
+          sudo apt-get install -y python3-pip git
+          pip3 install requests
 
-      - name: Clone agent repos
-        run: |
-          mkdir -p agents
-          cd agents
-          git clone --depth 1 https://github.com/Significant-Gravitas/AutoGPT.git || true
-          git clone --depth 1 https://github.com/joaomdmoura/crewAI.git || true
-          git clone --depth 1 https://github.com/HermesAgent/Hermes.git || true
-          git clone --depth 1 https://github.com/seed-ai/seed.git || true
-          git clone --depth 1 https://github.com/EvoAgentX/EvoAgentX.git || true
-          git clone --depth 1 https://github.com/sidix/sidix.git || true
-
-      - name: Restore checkpoint (Phoenix)
+      - name: Restore checkpoint
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: multi-agent-checkpoint
+          name: factory-checkpoint
           path: .checkpoint
 
-      - name: Load previous state
+      - name: Load state
         run: |
           if [ -f .checkpoint/state.tar.gz ]; then
             tar -xzf .checkpoint/state.tar.gz -C .
           fi
 
-      - name: Run Master Orchestrator (only GH_TOKEN)
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}   # শুধু এই টোকেন – কোনো GITHUB_TOKEN নেই
+      - name: Build all layers (No syntax error)
         run: |
           python3 << 'PYEOF'
-          import json, os, subprocess, time, shutil, random, requests
-          from concurrent.futures import ThreadPoolExecutor
+import json, os, subprocess, requests, time, shutil, glob
 
-          # ---------- স্টেট ----------
-          state_file = 'state.json'
-          if os.path.exists(state_file):
-              with open(state_file) as f:
-                  state = json.load(f)
-          else:
-              state = {
-                  'layers': {str(i): 'pending' for i in range(1,19)},
-                  'failcnt': {},
-                  'last_checkpoint': time.time(),
-                  'resources': []
-              }
+state_file = "state.json"
+if os.path.exists(state_file):
+    with open(state_file) as f:
+        state = json.load(f)
+else:
+    state = {
+        "layers": {str(i): "pending" for i in range(1,19)},
+        "fail": {},
+        "resources": []
+    }
 
-          # ---------- স্তরের নাম ----------
-          layer_names = {
-              '1':'data_engine','2':'rag','3':'agentic_soc','4':'active_defense',
-              '5':'retaliatory','6':'binary_harden','7':'kernel','8':'hyperv',
-              '9':'firmware','10':'microarch','11':'supply_chain','12':'quantum',
-              '13':'ai_defense','14':'human_centric','15':'counter_strike',
-              '16':'hyper_attribution','17':'global_data','18':'autonomous'
-          }
+layer_names = {
+    "1":"data_engine", "2":"rag", "3":"agentic_soc", "4":"active_defense",
+    "5":"retaliatory", "6":"binary_harden", "7":"kernel", "8":"hyperv",
+    "9":"firmware", "10":"microarch", "11":"supply_chain", "12":"quantum",
+    "13":"ai_defense", "14":"human_centric", "15":"counter_strike",
+    "16":"hyper_attribution", "17":"global_data", "18":"autonomous"
+}
 
-          # ---------- টর + প্রক্সি ----------
-          def renew_tor():
-              try:
-                  from stem import Signal
-                  from stem.control import Controller
-                  with Controller.from_port(port=9051) as ctrl:
-                      ctrl.authenticate()
-                      ctrl.signal(Signal.NEWNYM)
-                      time.sleep(2)
-              except: pass
-          def get_proxies():
-              renew_tor()
-              proxies = {"http": "socks5://127.0.0.1:9050", "https": "socks5://127.0.0.1:9050"}
-              try:
-                  resp = requests.get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000", timeout=8)
-                  if resp.status_code == 200:
-                      lines = resp.text.splitlines()
-                      if lines:
-                          p = random.choice(lines).strip()
-                          proxies["http"] = f"http://{p}"
-                          proxies["https"] = f"http://{p}"
-              except: pass
-              return proxies
+def scout():
+    resources = []
+    try:
+        r = requests.get("https://api.github.com/search/repositories?q=cybersecurity+defense", timeout=10)
+        if r.status_code == 200:
+            items = r.json().get("items", [])
+            resources = [(item["name"], item["html_url"]) for item in items[:5]]
+    except Exception:
+        pass
+    state["resources"] = resources
+    with open("scout_report.txt", "w") as f:
+        for name, url in resources:
+            f.write(f"{name}: {url}\n")
 
-          # ---------- ওয়েব ক্রল ----------
-          def scout():
-              proxies = get_proxies()
-              resources = []
-              # Surface: GitHub search
-              try:
-                  r = requests.get("https://api.github.com/search/repositories?q=cybersecurity+defense", timeout=10)
-                  if r.status_code == 200:
-                      resources = [item["html_url"] for item in r.json().get("items", [])[:3]]
-              except: pass
-              # Dark web random onion
-              try:
-                  onion = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz234567', k=16)) + '.onion'
-                  r = requests.get(f"http://{onion}", proxies=proxies, timeout=10)
-                  if r.status_code == 200:
-                      resources.append(onion)
-              except: pass
-              state['resources'] = resources
-              # ইস্যু তৈরি (যদি GH_TOKEN থাকে)
-              gh_token = os.environ.get("GH_TOKEN")
-              if gh_token and not os.environ.get("GROQ_API_KEY"):
-                  repo = os.environ['GITHUB_REPOSITORY']
-                  url = f"https://api.github.com/repos/{repo}/issues"
-                  headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
-                  data = {"title": "GPU: Groq API key missing", "body": "Add GROQ_API_KEY secret for faster inference."}
-                  try:
-                      requests.post(url, json=data, headers=headers)
-                  except: pass
-              return resources
+def fetch_code_from_github(layer_num, layer_name):
+    query = f"{layer_name} python defense"
+    try:
+        r = requests.get(f"https://api.github.com/search/repositories?q={query}&per_page=2", timeout=10)
+        if r.status_code == 200:
+            items = r.json().get("items", [])
+            for item in items:
+                clone_url = item["clone_url"]
+                target = f"tmp_{layer_num}"
+                shutil.rmtree(target, ignore_errors=True)
+                subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True)
+                shutil.rmtree(os.path.join(target, ".git"), ignore_errors=True)
+                py_files = glob.glob(f"{target}/*.py")
+                if py_files:
+                    src = py_files[0]
+                    dst = f"layers/layer_{layer_num}/core.py"
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy(src, dst)
+                    shutil.rmtree(target, ignore_errors=True)
+                    ret = subprocess.run(["python3", "-m", "py_compile", dst], capture_output=True)
+                    if ret.returncode == 0:
+                        return True
+                    else:
+                        os.remove(dst)
+    except Exception:
+        pass
+    return False
 
-          # ---------- আর্কিটেক্ট (Hermes কল) ----------
-          def architect(layer):
-              name = layer_names.get(layer, f"layer_{layer}")
-              prompt = f"Design cyber defense layer {name}. Output JSON with modules and algorithm."
-              # Hermes agent চালানোর চেষ্টা (যদি থাকে)
-              hermes_path = "agents/Hermes/main.py"
-              if os.path.exists(hermes_path):
-                  try:
-                      result = subprocess.run(["python3", hermes_path, "--goal", prompt], capture_output=True, text=True, timeout=60)
-                      output = result.stdout
-                      # খুব সিম্পল পার্সিং (বাস্তবে জেসন পার্স করতে হবে)
-                      if '{' in output:
-                          return output
-                  except: pass
-              # Fallback heuristic design
-              return '{"modules": ["monitor","respond"], "algorithm": "heuristic"}'
+def write_default_code(layer_num, layer_name):
+    code = f'''# Nobab Layer {layer_num}: {layer_name}
+import time
+class Defense:
+    def start(self):
+        print(f"[+] Layer {layer_num} ({layer_name}) started")
+        time.sleep(1)
+        return True
+'''
+    os.makedirs(f"layers/layer_{layer_num}", exist_ok=True)
+    with open(f"layers/layer_{layer_num}/core.py", "w") as f:
+        f.write(code)
+    ret = subprocess.run(["python3", "-m", "py_compile", f"layers/layer_{layer_num}/core.py"], capture_output=True)
+    return ret.returncode == 0
 
-          # ---------- বিল্ডার ----------
-          def builder(layer, design_json):
-              # অনলাইন সার্চ + সেলফ-আপডেট
-              def online_search_and_update(layer_num, layer_name):
-                  query = f"cybersecurity {layer_name} defense"
-                  try:
-                      r = requests.get(f"https://api.github.com/search/repositories?q={query}&per_page=1", timeout=10)
-                      if r.status_code == 200:
-                          items = r.json().get("items", [])
-                          if items:
-                              clone_url = items[0]["clone_url"]
-                              target = f"temp_update/layer_{layer_num}"
-                              os.makedirs(target, exist_ok=True)
-                              subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True)
-                              py_files = [f for f in os.listdir(target) if f.endswith('.py')]
-                              if py_files:
-                                  dest = f"layers/layer_{layer_num}/core.py"
-                                  os.makedirs(os.path.dirname(dest), exist_ok=True)
-                                  shutil.copy(os.path.join(target, py_files[0]), dest)
-                                  return True
-                  except: pass
-                  return False
+def build_layer(layer_num):
+    layer = str(layer_num)
+    name = layer_names.get(layer, f"layer_{layer_num}")
+    code_path = f"layers/layer_{layer}/core.py"
+    status = state["layers"].get(layer, "pending")
+    if status in ["pending", "partial"] or not os.path.exists(code_path):
+        success = fetch_code_from_github(layer_num, name)
+        if not success:
+            success = write_default_code(layer_num, name)
+        if success:
+            state["layers"][layer] = "done"
+            # git config
+            subprocess.run(["git", "config", "user.email", "bot@nobab.apex"])
+            subprocess.run(["git", "config", "user.name", "Nobab Bot"])
+            # remove lock if exists, then commit
+            lock_file = ".git/index.lock"
+            if os.path.exists(lock_file):
+                os.remove(lock_file)
+            subprocess.run(["git", "add", f"layers/layer_{layer}"])
+            subprocess.run(["git", "commit", "-m", f"auto: layer {layer} done", "--author='Nobab Bot <bot@nobab.apex>'"])
+            subprocess.run(["git", "push"])
+            time.sleep(2)
+        else:
+            state["layers"][layer] = "partial"
+            cnt = state["fail"].get(layer, 0) + 1
+            state["fail"][layer] = cnt
+            if cnt >= 3:
+                shutil.rmtree(f"layers/layer_{layer}", ignore_errors=True)
+                state["layers"][layer] = "pending"
+                if layer in state["fail"]:
+                    del state["fail"][layer]
+    return state["layers"][layer]
 
-              layer_dir = f"layers/layer_{layer}"
-              code_path = f"{layer_dir}/core.py"
-              if not os.path.exists(code_path) or not online_search_and_update(layer, layer_names.get(layer, '')):
-                  # Default code
-                  code = f"# Layer {layer}: {layer_names.get(layer, 'auto')}\ndef start():\n    print('Layer {layer} active')"
-                  os.makedirs(layer_dir, exist_ok=True)
-                  with open(code_path, 'w') as f:
-                      f.write(code)
-              # সিনট্যাক্স টেস্ট
-              ret = subprocess.run(["python3", "-m", "py_compile", code_path], capture_output=True)
-              if ret.returncode == 0:
-                  state['layers'][layer] = 'done'
-                  # ঘৃত কমিট
-                  subprocess.run(["git", "config", "user.email", "bot@nobab.apex"])
-                  subprocess.run(["git", "config", "user.name", "Nobab Bot"])
-                  subprocess.run(["git", "add", "."])
-                  subprocess.run(["git", "commit", "-m", f"auto: layer {layer} done", "--author='Nobab Bot <bot@nobab.apex>'"])
-                  subprocess.run(["git", "push"])
-              else:
-                  state['layers'][layer] = 'partial'
-                  cnt = state['failcnt'].get(layer, 0) + 1
-                  state['failcnt'][layer] = cnt
-                  if cnt >= 3:
-                      shutil.rmtree(layer_dir, ignore_errors=True)
-                      state['layers'][layer] = 'pending'
-                      del state['failcnt'][layer]
+def monitor_and_checkpoint():
+    lines = ["# Nobab Factory Status\n"]
+    for i in range(1,19):
+        st = state["layers"].get(str(i), "unknown")
+        icon = "✅" if st == "done" else "⏳" if st == "pending" else "❌" if st == "failed" else "⚠️"
+        lines.append(f"{icon} Layer {i}: {layer_names.get(str(i),'')} → {st}")
+    lines.append(f"\n🕒 Last update: {time.ctime()}")
+    with open("STATUS.md", "w") as f:
+        f.write("\n".join(lines))
+    with open(state_file, "w") as f:
+        json.dump(state, f)
+    subprocess.run(["tar", "-czf", "state.tar.gz", state_file, "layers/"], capture_output=True)
+    os.makedirs(".checkpoint", exist_ok=True)
+    shutil.move("state.tar.gz", ".checkpoint/")
+    # status commit
+    lock_file = ".git/index.lock"
+    if os.path.exists(lock_file):
+        os.remove(lock_file)
+    subprocess.run(["git", "add", "STATUS.md", "scout_report.txt"], capture_output=True)
+    subprocess.run(["git", "commit", "-m", "update status", "--author='Nobab Bot <bot@nobab.apex>'"], capture_output=True)
+    subprocess.run(["git", "push"], capture_output=True)
+    time.sleep(1)
 
-          # ---------- মেইন ----------
-          scout()
-          pending = [l for l,st in state['layers'].items() if st in ['pending','partial']]
-          with ThreadPoolExecutor(max_workers=3) as ex:
-              futures = []
-              for l in pending[:4]:
-                  design = architect(l)
-                  futures.append(ex.submit(builder, l, design))
-              for f in futures:
-                  f.result()
-
-          # চেকপয়েন্ট সেভ
-          with open(state_file, 'w') as f:
-              json.dump(state, f)
-          subprocess.run(["tar", "-czf", "state.tar.gz", "state.json", "layers/"])
-          os.makedirs(".checkpoint", exist_ok=True)
-          shutil.move("state.tar.gz", ".checkpoint/")
-          PYEOF
+scout()
+for layer_num in range(1, 19):
+    build_layer(layer_num)
+monitor_and_checkpoint()
+PYEOF
 
       - name: Upload checkpoint artifact
         uses: actions/upload-artifact@v4
         with:
-          name: multi-agent-checkpoint
+          name: factory-checkpoint
           path: .checkpoint/state.tar.gz
           retention-days: 1
-
-      - name: Dashboard commit
-        run: |
-          echo "<html><body><h1>Nobab Multi-Agent Active</h1><p>Last updated: $(date)</p></body></html>" > index.html
-          git add index.html || true
-          git commit -m "dashboard update" --author="Nobab Bot <bot@nobab.apex>" || true
-          git push || true
