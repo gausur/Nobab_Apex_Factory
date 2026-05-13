@@ -4,40 +4,47 @@ on:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
-env:
-  SEED_IMAGE: nobab_vision.png
-  PROXY_LIST_URL: "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all"
-
 jobs:
   apex_engine:
     runs-on: ubuntu-latest
     timeout-minutes: 300
+    permissions:
+      issues: write
+      contents: write
     steps:
       - uses: actions/checkout@v4
       
-      - name: Install all deps
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y tor exiftool
           pip3 install requests beautifulsoup4 pillow pycryptodome stem
 
-      - name: Restore checkpoint (if any)
+      - name: Restore checkpoint
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
           name: apex-checkpoint
           path: .checkpoint
 
-      - name: Load previous state
+      - name: Load state
         run: |
           if [ -f .checkpoint/state.tar.gz ]; then
             tar -xzf .checkpoint/state.tar.gz -C .
           fi
 
-      - name: The Full Swarm (Dark Web + Backup + GPU Requests)
+      - name: Run Full Swarm
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}   # ব্যবহার করবে GH_TOKEN
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python3 << 'PYEOF'
-          import json, time, subprocess, requests, os, random, hashlib, glob, shutil, re, base64, socket, struct
+          import json, time, subprocess, requests, os, random, hashlib, glob, shutil, re, base64
           from concurrent.futures import ThreadPoolExecutor
           from stem import Signal
           from stem.control import Controller
@@ -45,10 +52,10 @@ jobs:
           from PIL import Image
           from PIL.ExifTags import TAGS
 
-          # ---------- 0. ডিফল্ট মিশন (যদি ছবি কাজ না করে) ----------
+          # ---------- DEFAULT MISSION ----------
           DEFAULT_MISSION = {
               "MISSION": "BUILD_18_LAYERS",
-              "RULES": "NO_HF, DARK_WEB, OBFUSCATE, TOR_CHAIN",
+              "RULES": "NO_HF, TOR_CHAIN, OBFUSCATE, DARK_WEB",
               "WORK_CYCLE": "5h_work,1h_sleep",
               "LAYERS": {
                   "1": "data_engine","2": "rag","3": "agentic_soc","4": "active_defense",
@@ -60,7 +67,7 @@ jobs:
               "REQUIRE_API_KEYS": ["GROQ", "OPENROUTER", "KAGGLE"]
           }
 
-          # ---------- 1. স্টেট লোড ----------
+          # ---------- STATE ----------
           if os.path.exists("state.json"):
               with open("state.json") as f:
                   state = json.load(f)
@@ -69,7 +76,7 @@ jobs:
                        "last_checkpoint": time.time(),
                        "resources": {}}
 
-          # ---------- 2. সীড ইমেজ বা ডিফল্ট ----------
+          # ---------- SEED IMAGE (optional) ----------
           try:
               img = Image.open("nobab_vision.png")
               exif = img._getexif()
@@ -89,10 +96,10 @@ jobs:
               else:
                   mission = DEFAULT_MISSION
           except Exception as e:
-              print(f"Fallback to default mission: {e}")
+              print(f"⚠️ Seed error: {e}. Using default mission.")
               mission = DEFAULT_MISSION
 
-          # ---------- 3. টর + প্রক্সি চেইনিং ----------
+          # ---------- TOR + PROXY ----------
           def renew_tor():
               try:
                   with Controller.from_port(port=9051) as ctrl:
@@ -101,11 +108,12 @@ jobs:
                       time.sleep(3)
               except: pass
 
+          PROXY_URL = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all"
           def get_proxies():
               renew_tor()
               proxies = {"http": "socks5://127.0.0.1:9050", "https": "socks5://127.0.0.1:9050"}
               try:
-                  resp = requests.get(os.environ['PROXY_LIST_URL'], timeout=8)
+                  resp = requests.get(PROXY_URL, timeout=10)
                   if resp.status_code == 200:
                       lines = resp.text.splitlines()
                       if lines:
@@ -115,20 +123,17 @@ jobs:
               except: pass
               return proxies
 
-          # ---------- 4. ডার্ক ওয়েব ক্রলিং (.onion ব্রুট) ----------
+          # ---------- DARK WEB CRAWL ----------
           def darkweb_crawl():
               proxies = get_proxies()
               discovered = []
-              # কিছু পরিচিত অনিয়ন ডিরেক্টরি (ফ্যালব্যাক)
               known = ["torwikii.onion", "darkfail.onion", "ahmia.fi"]
               for dom in known:
                   try:
-                      url = f"http://{dom}"
-                      r = requests.get(url, proxies=proxies, timeout=20)
+                      r = requests.get(f"http://{dom}", proxies=proxies, timeout=20)
                       if r.status_code == 200:
                           discovered.append(dom)
                   except: pass
-              # এলোমেলো অনিয়ন জেনারেশন (ব্রুট ভাগ্য)
               for _ in range(30):
                   rand = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz234567', k=16))
                   test = f"{rand}.onion"
@@ -139,32 +144,38 @@ jobs:
                   except: pass
               return discovered
 
-          # ---------- 5. মাল্টি-মডেল কনসেনসাস (API ছাড়া Ollama ব্যাকআপ) ----------
+          # ---------- MULTI-MODEL ----------
           def multi_model(prompt):
               results = []
-              for key, url, model in [
-                  (os.environ.get("GROQ_API_KEY"), "https://api.groq.com/openai/v1/chat/completions", "llama3-70b-8192"),
-                  (os.environ.get("OPENROUTER_API_KEY"), "https://openrouter.ai/api/v1/chat/completions", "deepseek/deepseek-r1")
-              ]:
-                  if key:
-                      try:
-                          resp = requests.post(url, headers={"Authorization": f"Bearer {key}"},
-                                               json={"model": model, "messages": [{"role": "user", "content": prompt}]},
-                                               timeout=25)
-                          if resp.status_code == 200:
-                              results.append(resp.json()["choices"][0]["message"]["content"])
-                      except: pass
-              # লোকাল Ollama (সবসময় ব্যাকআপ)
+              groq_key = os.environ.get("GROQ_API_KEY")
+              if groq_key:
+                  try:
+                      resp = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                          headers={"Authorization": f"Bearer {groq_key}"},
+                          json={"model": "llama3-70b-8192", "messages": [{"role": "user", "content": prompt}]},
+                          timeout=25)
+                      if resp.status_code == 200:
+                          results.append(resp.json()["choices"][0]["message"]["content"])
+                  except: pass
+              or_key = os.environ.get("OPENROUTER_API_KEY")
+              if or_key:
+                  try:
+                      resp = requests.post("https://openrouter.ai/api/v1/chat/completions",
+                          headers={"Authorization": f"Bearer {or_key}"},
+                          json={"model": "deepseek/deepseek-r1", "messages": [{"role": "user", "content": prompt}]},
+                          timeout=25)
+                      if resp.status_code == 200:
+                          results.append(resp.json()["choices"][0]["message"]["content"])
+                  except: pass
               try:
-                  r = requests.post("http://localhost:11434/api/generate", json={"model": "codellama", "prompt": prompt}, timeout=60)
-                  if r.status_code == 200:
-                      results.append(r.json()["response"])
+                  resp = requests.post("http://localhost:11434/api/generate", json={"model": "codellama", "prompt": prompt}, timeout=60)
+                  if resp.status_code == 200:
+                      results.append(resp.json()["response"])
               except: pass
-              if not results:
-                  return ""
+              if not results: return ""
               return results[0] if len(results)==1 else (results[0] if results[0]==results[1] else results[0])
 
-          # ---------- 6. অবফাসকেশন ----------
+          # ---------- OBFUSCATION ----------
           def obfuscate(code):
               for i in range(10):
                   code = code.replace(f"x{i}", ''.join(random.choices('abcdef',k=6)))
@@ -172,31 +183,35 @@ jobs:
               lines = code.split('\n')
               return '\n'.join([l+' \u200b' for l in lines]) + f"\n# {hashlib.md5(str(time.time()).encode()).hexdigest()}\n"
 
-          # ---------- 7. স্কাউট + ইস্যু ক্রিয়েট ----------
+          # ---------- ISSUE (using GH_TOKEN) ----------
           def create_issue(title, body):
+              token = os.environ.get("GITHUB_TOKEN")
+              if not token:
+                  print("⚠️ No GH_TOKEN found, skipping issue creation.")
+                  return
               repo = os.environ['GITHUB_REPOSITORY']
               url = f"https://api.github.com/repos/{repo}/issues"
-              headers = {"Authorization": f"token {os.environ['GITHUB_TOKEN']}",
-                         "Accept": "application/vnd.github.v3+json"}
+              headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
               try:
-                  requests.post(url, json={"title": title, "body": body}, headers=headers)
-              except: pass
+                  requests.post(url, json={"title": title, "body": body}, headers=headers, timeout=10)
+                  print(f"Issue created: {title}")
+              except Exception as e:
+                  print(f"Issue failed: {e}")
 
+          # ---------- SCOUT ----------
           def scout():
               proxies = get_proxies()
-              # Dark web crawl
               dark = darkweb_crawl()
               state["darkweb_seeds"] = dark
-              # API missing report (GPUs)
               if not os.environ.get("GROQ_API_KEY"):
-                  create_issue("GPU: Groq API key missing", "Please add GROQ_API_KEY secret to enable fast inference.")
+                  create_issue("GPU: Groq API key missing", "Add GROQ_API_KEY secret.")
               if not os.environ.get("OPENROUTER_API_KEY"):
-                  create_issue("GPU: OpenRouter API key missing", "Add OPENROUTER_API_KEY for multi-model consensus.")
+                  create_issue("GPU: OpenRouter API key missing", "Add OPENROUTER_API_KEY.")
               if not (os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY")):
-                  create_issue("GPU: Kaggle credentials missing", "Add KAGGLE_USERNAME and KAGGLE_KEY for free GPU hours.")
+                  create_issue("GPU: Kaggle credentials missing", "Add KAGGLE_USERNAME and KAGGLE_KEY.")
               return dark
 
-          # ---------- 8. আর্কিটেক্ট ----------
+          # ---------- ARCHITECT ----------
           def architect():
               pending = [l for l,st in state["layers"].items() if st in ["pending","partial"]]
               if not pending: return "all_done"
@@ -209,7 +224,7 @@ jobs:
               state["layers"][l] = "designing"
               return logic
 
-          # ---------- 9. বিল্ডার ----------
+          # ---------- BUILDER ----------
           def builder():
               d = state.get("arch_design")
               if not d: return
@@ -231,16 +246,16 @@ jobs:
               except:
                   state["layers"][l] = "partial"
 
-          # ---------- 10. ন্যানো-কার্নেল ও ফিনিক্স ----------
+          # ---------- NANO KERNEL & CHECKPOINT ----------
           def nano_kernel():
-              for l, st in state["layers"].items():
-                  if st == "partial":
-                      cnt = state.get("failcnt",{}).get(l,0)+1
-                      state["failcnt"][l]=cnt
+              for lay, stat in state["layers"].items():
+                  if stat == "partial":
+                      cnt = state.get("failcnt",{}).get(lay,0)+1
+                      state["failcnt"][lay]=cnt
                       if cnt>=3:
-                          shutil.rmtree(f"layers/layer_{l}", ignore_errors=True)
-                          state["layers"][l]="pending"
-                          del state["failcnt"][l]
+                          shutil.rmtree(f"layers/layer_{lay}", ignore_errors=True)
+                          state["layers"][lay]="pending"
+                          del state["failcnt"][lay]
               return True
 
           def save_checkpoint():
@@ -249,22 +264,7 @@ jobs:
               os.makedirs(".checkpoint",exist_ok=True)
               shutil.move("state.tar.gz",".checkpoint/")
 
-          # ---------- 11. টেলিগ্রাম + IPFS ব্যাকআপ (ঐচ্ছিক) ----------
-          def extra_backup():
-              token = os.environ.get("TELEGRAM_BOT_TOKEN")
-              chat = os.environ.get("TELEGRAM_CHAT_ID")
-              if token and chat:
-                  with open("state.tar.gz","rb") as f:
-                      files = {"document": f}
-                      url = f"https://api.telegram.org/bot{token}/sendDocument"
-                      data = {"chat_id": chat, "caption": "Apex checkpoint"}
-                      try:
-                          requests.post(url, data=data, files=files, timeout=30)
-                      except: pass
-              # IPFS পাবলিক গেটওয়ে (শুধু পড়া যায়, লেখার চেষ্টা করি না)
-              # এখানে IPFS আপলোড বাদ দিচ্ছি কারণ টোকেন লাগে – তবে structure রেখেছি।
-
-          # ---------- 12. মেইন সোয়ার্ম ----------
+          # ---------- MAIN ----------
           with ThreadPoolExecutor(max_workers=3) as ex:
               sc = ex.submit(scout)
               ar = ex.submit(architect)
@@ -274,19 +274,18 @@ jobs:
                   builder()
               nano_kernel()
               save_checkpoint()
-              extra_backup()
           PYEOF
 
-      - name: Upload checkpoint artifact
+      - name: Upload checkpoint
         uses: actions/upload-artifact@v4
         with:
           name: apex-checkpoint
           path: .checkpoint/state.tar.gz
           retention-days: 1
 
-      - name: Final dashboard
+      - name: Dashboard commit
         run: |
-          echo "<html><body><h1>Nobab Apex Complete</h1><p>Active since $(date)</p></body></html>" > index.html
+          echo "<html><body><h1>Nobab Apex Active</h1><p>Last updated: $(date)</p></body></html>" > index.html
           git add index.html || true
           git commit -m "dashboard update" --author="Nobab Bot <bot@nobab.apex>" || true
           git push || true
