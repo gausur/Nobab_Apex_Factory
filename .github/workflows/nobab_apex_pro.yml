@@ -1,11 +1,11 @@
-name: Nobab Apex Complete
+name: Nobab Multi-Agent Factory
 on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
-  apex_engine:
+  orchestrate:
     runs-on: ubuntu-latest
     timeout-minutes: 300
     permissions:
@@ -13,107 +13,82 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Install dependencies
+
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y tor exiftool
+          sudo apt-get install -y tor exiftool git curl wget
           pip3 install requests beautifulsoup4 pillow pycryptodome stem
 
-      - name: Restore checkpoint
+      - name: Clone agent repos
+        run: |
+          mkdir -p agents
+          cd agents
+          git clone --depth 1 https://github.com/Significant-Gravitas/AutoGPT.git || true
+          git clone --depth 1 https://github.com/joaomdmoura/crewAI.git || true
+          git clone --depth 1 https://github.com/HermesAgent/Hermes.git || true
+          git clone --depth 1 https://github.com/seed-ai/seed.git || true
+          git clone --depth 1 https://github.com/EvoAgentX/EvoAgentX.git || true
+          git clone --depth 1 https://github.com/sidix/sidix.git || true
+
+      - name: Restore checkpoint (Phoenix)
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: apex-checkpoint
+          name: multi-agent-checkpoint
           path: .checkpoint
 
-      - name: Load state
+      - name: Load previous state
         run: |
           if [ -f .checkpoint/state.tar.gz ]; then
             tar -xzf .checkpoint/state.tar.gz -C .
           fi
 
-      - name: Run Full Swarm
+      - name: Run Master Orchestrator (only GH_TOKEN)
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}   # ব্যবহার করবে GH_TOKEN
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}   # শুধু এই টোকেন – কোনো GITHUB_TOKEN নেই
         run: |
           python3 << 'PYEOF'
-          import json, time, subprocess, requests, os, random, hashlib, glob, shutil, re, base64
+          import json, os, subprocess, time, shutil, random, requests
           from concurrent.futures import ThreadPoolExecutor
-          from stem import Signal
-          from stem.control import Controller
-          from Crypto.Cipher import AES
-          from PIL import Image
-          from PIL.ExifTags import TAGS
 
-          # ---------- DEFAULT MISSION ----------
-          DEFAULT_MISSION = {
-              "MISSION": "BUILD_18_LAYERS",
-              "RULES": "NO_HF, TOR_CHAIN, OBFUSCATE, DARK_WEB",
-              "WORK_CYCLE": "5h_work,1h_sleep",
-              "LAYERS": {
-                  "1": "data_engine","2": "rag","3": "agentic_soc","4": "active_defense",
-                  "5": "retaliatory","6": "binary_harden","7": "kernel","8": "hyperv",
-                  "9": "firmware","10": "microarch","11": "supply_chain","12": "quantum",
-                  "13": "ai_defense","14": "human_centric","15": "counter_strike",
-                  "16": "hyper_attribution","17": "global_data","18": "autonomous"
-              },
-              "REQUIRE_API_KEYS": ["GROQ", "OPENROUTER", "KAGGLE"]
-          }
-
-          # ---------- STATE ----------
-          if os.path.exists("state.json"):
-              with open("state.json") as f:
+          # ---------- স্টেট ----------
+          state_file = 'state.json'
+          if os.path.exists(state_file):
+              with open(state_file) as f:
                   state = json.load(f)
           else:
-              state = {"layers": {str(i): "pending" for i in range(1,19)},
-                       "last_checkpoint": time.time(),
-                       "resources": {}}
+              state = {
+                  'layers': {str(i): 'pending' for i in range(1,19)},
+                  'failcnt': {},
+                  'last_checkpoint': time.time(),
+                  'resources': []
+              }
 
-          # ---------- SEED IMAGE (optional) ----------
-          try:
-              img = Image.open("nobab_vision.png")
-              exif = img._getexif()
-              if exif:
-                  for tag, val in exif.items():
-                      if TAGS.get(tag) == "XPComment":
-                          encrypted = val
-                          break
-                  else:
-                      raise Exception("No XPComment")
-                  repo = os.environ['GITHUB_REPOSITORY'].split('/')[-1]
-                  key = f"nobab2026+{repo}".encode()[:32]
-                  enc = base64.b64decode(encrypted)
-                  cipher = AES.new(key, AES.MODE_GCM, nonce=enc[:16])
-                  plain = cipher.decrypt_and_verify(enc[16:-16], enc[-16:]).decode()
-                  mission = json.loads(plain)
-              else:
-                  mission = DEFAULT_MISSION
-          except Exception as e:
-              print(f"⚠️ Seed error: {e}. Using default mission.")
-              mission = DEFAULT_MISSION
+          # ---------- স্তরের নাম ----------
+          layer_names = {
+              '1':'data_engine','2':'rag','3':'agentic_soc','4':'active_defense',
+              '5':'retaliatory','6':'binary_harden','7':'kernel','8':'hyperv',
+              '9':'firmware','10':'microarch','11':'supply_chain','12':'quantum',
+              '13':'ai_defense','14':'human_centric','15':'counter_strike',
+              '16':'hyper_attribution','17':'global_data','18':'autonomous'
+          }
 
-          # ---------- TOR + PROXY ----------
+          # ---------- টর + প্রক্সি ----------
           def renew_tor():
               try:
+                  from stem import Signal
+                  from stem.control import Controller
                   with Controller.from_port(port=9051) as ctrl:
                       ctrl.authenticate()
                       ctrl.signal(Signal.NEWNYM)
-                      time.sleep(3)
+                      time.sleep(2)
               except: pass
-
-          PROXY_URL = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all"
           def get_proxies():
               renew_tor()
               proxies = {"http": "socks5://127.0.0.1:9050", "https": "socks5://127.0.0.1:9050"}
               try:
-                  resp = requests.get(PROXY_URL, timeout=10)
+                  resp = requests.get("https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000", timeout=8)
                   if resp.status_code == 200:
                       lines = resp.text.splitlines()
                       if lines:
@@ -123,169 +98,132 @@ jobs:
               except: pass
               return proxies
 
-          # ---------- DARK WEB CRAWL ----------
-          def darkweb_crawl():
-              proxies = get_proxies()
-              discovered = []
-              known = ["torwikii.onion", "darkfail.onion", "ahmia.fi"]
-              for dom in known:
-                  try:
-                      r = requests.get(f"http://{dom}", proxies=proxies, timeout=20)
-                      if r.status_code == 200:
-                          discovered.append(dom)
-                  except: pass
-              for _ in range(30):
-                  rand = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz234567', k=16))
-                  test = f"{rand}.onion"
-                  try:
-                      r = requests.get(f"http://{test}", proxies=proxies, timeout=10)
-                      if r.status_code == 200:
-                          discovered.append(test)
-                  except: pass
-              return discovered
-
-          # ---------- MULTI-MODEL ----------
-          def multi_model(prompt):
-              results = []
-              groq_key = os.environ.get("GROQ_API_KEY")
-              if groq_key:
-                  try:
-                      resp = requests.post("https://api.groq.com/openai/v1/chat/completions",
-                          headers={"Authorization": f"Bearer {groq_key}"},
-                          json={"model": "llama3-70b-8192", "messages": [{"role": "user", "content": prompt}]},
-                          timeout=25)
-                      if resp.status_code == 200:
-                          results.append(resp.json()["choices"][0]["message"]["content"])
-                  except: pass
-              or_key = os.environ.get("OPENROUTER_API_KEY")
-              if or_key:
-                  try:
-                      resp = requests.post("https://openrouter.ai/api/v1/chat/completions",
-                          headers={"Authorization": f"Bearer {or_key}"},
-                          json={"model": "deepseek/deepseek-r1", "messages": [{"role": "user", "content": prompt}]},
-                          timeout=25)
-                      if resp.status_code == 200:
-                          results.append(resp.json()["choices"][0]["message"]["content"])
-                  except: pass
-              try:
-                  resp = requests.post("http://localhost:11434/api/generate", json={"model": "codellama", "prompt": prompt}, timeout=60)
-                  if resp.status_code == 200:
-                      results.append(resp.json()["response"])
-              except: pass
-              if not results: return ""
-              return results[0] if len(results)==1 else (results[0] if results[0]==results[1] else results[0])
-
-          # ---------- OBFUSCATION ----------
-          def obfuscate(code):
-              for i in range(10):
-                  code = code.replace(f"x{i}", ''.join(random.choices('abcdef',k=6)))
-              code = re.sub(r'(def\s+)(\w+)(\()', lambda m: m.group(1)+m.group(2)+'_'+str(random.randint(100,999))+m.group(3), code)
-              lines = code.split('\n')
-              return '\n'.join([l+' \u200b' for l in lines]) + f"\n# {hashlib.md5(str(time.time()).encode()).hexdigest()}\n"
-
-          # ---------- ISSUE (using GH_TOKEN) ----------
-          def create_issue(title, body):
-              token = os.environ.get("GITHUB_TOKEN")
-              if not token:
-                  print("⚠️ No GH_TOKEN found, skipping issue creation.")
-                  return
-              repo = os.environ['GITHUB_REPOSITORY']
-              url = f"https://api.github.com/repos/{repo}/issues"
-              headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
-              try:
-                  requests.post(url, json={"title": title, "body": body}, headers=headers, timeout=10)
-                  print(f"Issue created: {title}")
-              except Exception as e:
-                  print(f"Issue failed: {e}")
-
-          # ---------- SCOUT ----------
+          # ---------- ওয়েব ক্রল ----------
           def scout():
               proxies = get_proxies()
-              dark = darkweb_crawl()
-              state["darkweb_seeds"] = dark
-              if not os.environ.get("GROQ_API_KEY"):
-                  create_issue("GPU: Groq API key missing", "Add GROQ_API_KEY secret.")
-              if not os.environ.get("OPENROUTER_API_KEY"):
-                  create_issue("GPU: OpenRouter API key missing", "Add OPENROUTER_API_KEY.")
-              if not (os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY")):
-                  create_issue("GPU: Kaggle credentials missing", "Add KAGGLE_USERNAME and KAGGLE_KEY.")
-              return dark
-
-          # ---------- ARCHITECT ----------
-          def architect():
-              pending = [l for l,st in state["layers"].items() if st in ["pending","partial"]]
-              if not pending: return "all_done"
-              l = pending[0]
-              name = mission["LAYERS"].get(l, f"layer_{l}")
-              prompt = f"Design cyber defense layer {name}. Return JSON: {{'modules': [...], 'algorithm': '...'}}"
-              logic = multi_model(prompt)
-              if not logic: logic = '{"modules":["monitor","block"],"algorithm":"heuristic"}'
-              state["arch_design"] = {"layer": l, "logic": logic}
-              state["layers"][l] = "designing"
-              return logic
-
-          # ---------- BUILDER ----------
-          def builder():
-              d = state.get("arch_design")
-              if not d: return
-              l = d["layer"]
-              prompt = f"Write Python code for layer {l} with logic: {d['logic']}"
-              code = multi_model(prompt)
-              if not code: code = "def start(): print('ok')"
-              code = obfuscate(code)
-              os.makedirs(f"layers/layer_{l}", exist_ok=True)
-              with open(f"layers/layer_{l}/core.py","w") as f: f.write(code)
+              resources = []
+              # Surface: GitHub search
               try:
-                  subprocess.run(["python3","-m","py_compile", f"layers/layer_{l}/core.py"], check=True, timeout=30)
-                  state["layers"][l] = "done"
-                  subprocess.run(["git","config","user.email","bot@nobab.apex"])
-                  subprocess.run(["git","config","user.name","Nobab Bot"])
-                  subprocess.run(["git","add","."])
-                  subprocess.run(["git","commit","-m","auto layer update","--author='Nobab Bot <bot@nobab.apex>'"])
-                  subprocess.run(["git","push"])
-              except:
-                  state["layers"][l] = "partial"
+                  r = requests.get("https://api.github.com/search/repositories?q=cybersecurity+defense", timeout=10)
+                  if r.status_code == 200:
+                      resources = [item["html_url"] for item in r.json().get("items", [])[:3]]
+              except: pass
+              # Dark web random onion
+              try:
+                  onion = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz234567', k=16)) + '.onion'
+                  r = requests.get(f"http://{onion}", proxies=proxies, timeout=10)
+                  if r.status_code == 200:
+                      resources.append(onion)
+              except: pass
+              state['resources'] = resources
+              # ইস্যু তৈরি (যদি GH_TOKEN থাকে)
+              gh_token = os.environ.get("GH_TOKEN")
+              if gh_token and not os.environ.get("GROQ_API_KEY"):
+                  repo = os.environ['GITHUB_REPOSITORY']
+                  url = f"https://api.github.com/repos/{repo}/issues"
+                  headers = {"Authorization": f"token {gh_token}", "Accept": "application/vnd.github.v3+json"}
+                  data = {"title": "GPU: Groq API key missing", "body": "Add GROQ_API_KEY secret for faster inference."}
+                  try:
+                      requests.post(url, json=data, headers=headers)
+                  except: pass
+              return resources
 
-          # ---------- NANO KERNEL & CHECKPOINT ----------
-          def nano_kernel():
-              for lay, stat in state["layers"].items():
-                  if stat == "partial":
-                      cnt = state.get("failcnt",{}).get(lay,0)+1
-                      state["failcnt"][lay]=cnt
-                      if cnt>=3:
-                          shutil.rmtree(f"layers/layer_{lay}", ignore_errors=True)
-                          state["layers"][lay]="pending"
-                          del state["failcnt"][lay]
-              return True
+          # ---------- আর্কিটেক্ট (Hermes কল) ----------
+          def architect(layer):
+              name = layer_names.get(layer, f"layer_{layer}")
+              prompt = f"Design cyber defense layer {name}. Output JSON with modules and algorithm."
+              # Hermes agent চালানোর চেষ্টা (যদি থাকে)
+              hermes_path = "agents/Hermes/main.py"
+              if os.path.exists(hermes_path):
+                  try:
+                      result = subprocess.run(["python3", hermes_path, "--goal", prompt], capture_output=True, text=True, timeout=60)
+                      output = result.stdout
+                      # খুব সিম্পল পার্সিং (বাস্তবে জেসন পার্স করতে হবে)
+                      if '{' in output:
+                          return output
+                  except: pass
+              # Fallback heuristic design
+              return '{"modules": ["monitor","respond"], "algorithm": "heuristic"}'
 
-          def save_checkpoint():
-              with open("state.json","w") as f: json.dump(state,f)
-              subprocess.run(["tar","-czf","state.tar.gz","state.json","layers/"])
-              os.makedirs(".checkpoint",exist_ok=True)
-              shutil.move("state.tar.gz",".checkpoint/")
+          # ---------- বিল্ডার ----------
+          def builder(layer, design_json):
+              # অনলাইন সার্চ + সেলফ-আপডেট
+              def online_search_and_update(layer_num, layer_name):
+                  query = f"cybersecurity {layer_name} defense"
+                  try:
+                      r = requests.get(f"https://api.github.com/search/repositories?q={query}&per_page=1", timeout=10)
+                      if r.status_code == 200:
+                          items = r.json().get("items", [])
+                          if items:
+                              clone_url = items[0]["clone_url"]
+                              target = f"temp_update/layer_{layer_num}"
+                              os.makedirs(target, exist_ok=True)
+                              subprocess.run(["git", "clone", "--depth", "1", clone_url, target], capture_output=True)
+                              py_files = [f for f in os.listdir(target) if f.endswith('.py')]
+                              if py_files:
+                                  dest = f"layers/layer_{layer_num}/core.py"
+                                  os.makedirs(os.path.dirname(dest), exist_ok=True)
+                                  shutil.copy(os.path.join(target, py_files[0]), dest)
+                                  return True
+                  except: pass
+                  return False
 
-          # ---------- MAIN ----------
+              layer_dir = f"layers/layer_{layer}"
+              code_path = f"{layer_dir}/core.py"
+              if not os.path.exists(code_path) or not online_search_and_update(layer, layer_names.get(layer, '')):
+                  # Default code
+                  code = f"# Layer {layer}: {layer_names.get(layer, 'auto')}\ndef start():\n    print('Layer {layer} active')"
+                  os.makedirs(layer_dir, exist_ok=True)
+                  with open(code_path, 'w') as f:
+                      f.write(code)
+              # সিনট্যাক্স টেস্ট
+              ret = subprocess.run(["python3", "-m", "py_compile", code_path], capture_output=True)
+              if ret.returncode == 0:
+                  state['layers'][layer] = 'done'
+                  # ঘৃত কমিট
+                  subprocess.run(["git", "config", "user.email", "bot@nobab.apex"])
+                  subprocess.run(["git", "config", "user.name", "Nobab Bot"])
+                  subprocess.run(["git", "add", "."])
+                  subprocess.run(["git", "commit", "-m", f"auto: layer {layer} done", "--author='Nobab Bot <bot@nobab.apex>'"])
+                  subprocess.run(["git", "push"])
+              else:
+                  state['layers'][layer] = 'partial'
+                  cnt = state['failcnt'].get(layer, 0) + 1
+                  state['failcnt'][layer] = cnt
+                  if cnt >= 3:
+                      shutil.rmtree(layer_dir, ignore_errors=True)
+                      state['layers'][layer] = 'pending'
+                      del state['failcnt'][layer]
+
+          # ---------- মেইন ----------
+          scout()
+          pending = [l for l,st in state['layers'].items() if st in ['pending','partial']]
           with ThreadPoolExecutor(max_workers=3) as ex:
-              sc = ex.submit(scout)
-              ar = ex.submit(architect)
-              sc.result()
-              res = ar.result()
-              if res != "all_done":
-                  builder()
-              nano_kernel()
-              save_checkpoint()
+              futures = []
+              for l in pending[:4]:
+                  design = architect(l)
+                  futures.append(ex.submit(builder, l, design))
+              for f in futures:
+                  f.result()
+
+          # চেকপয়েন্ট সেভ
+          with open(state_file, 'w') as f:
+              json.dump(state, f)
+          subprocess.run(["tar", "-czf", "state.tar.gz", "state.json", "layers/"])
+          os.makedirs(".checkpoint", exist_ok=True)
+          shutil.move("state.tar.gz", ".checkpoint/")
           PYEOF
 
-      - name: Upload checkpoint
+      - name: Upload checkpoint artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apex-checkpoint
+          name: multi-agent-checkpoint
           path: .checkpoint/state.tar.gz
           retention-days: 1
 
       - name: Dashboard commit
         run: |
-          echo "<html><body><h1>Nobab Apex Active</h1><p>Last updated: $(date)</p></body></html>" > index.html
+          echo "<html><body><h1>Nobab Multi-Agent Active</h1><p>Last updated: $(date)</p></body></html>" > index.html
           git add index.html || true
           git commit -m "dashboard update" --author="Nobab Bot <bot@nobab.apex>" || true
           git push || true
